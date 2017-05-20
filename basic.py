@@ -1,7 +1,7 @@
 from collections import OrderedDict
 
-import math.pi as pi
-import math.cos as cos
+from math import pi
+from math import cos
 
 import torch
 import torch.nn as nn
@@ -10,22 +10,25 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.autograd import Variable
 
+import visdom
+import numpy as np
+
 # variables
 cuda = True if torch.cuda.is_available() else False
 batch_size = 64
 
-
 # load data
-transform=transforms.Compose([transforms.ToTensor(),
-                              transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                             ])
+transform = transforms.Compose([transforms.ToTensor(),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                                ])
 train_loader = torch.utils.data.DataLoader(
     datasets.CIFAR10('data/cifar10', train=True, download=True,
-                   transform=transform),
+                     transform=transform),
     batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(
     datasets.CIFAR10('data/cifar10', train=False, transform=transform),
     batch_size=batch_size, shuffle=True)
+
 
 class Net(nn.Module):
     def __init__(self):
@@ -50,42 +53,127 @@ class Net(nn.Module):
         x = F.softmax(self.dense2(x))
         return x
 
-def train(total_iter, cycle, initial_lr):
+
+def proposed_lr(initial_lr, iteration, epoch_per_cycle):
+    # proposed learning late function
+    return initial_lr * (cos(pi * iteration / epoch_per_cycle) + 1) / 2
+
+
+def train_se(model, epochs, cycles, initial_lr, vis=None):
+    """
+    during an iteration a batch goes forward and backward  
+    while during an epoch every batch of a data set is processed
+    """
     models = []
-    cycle_size = total_iter // cycle
+    _lr_list, _loss_list = [], []
+    count = 0
+    epochs_per_cycle = epochs // cycles
+    optimizer = optim.SGD(model.parameters(), lr=initial_lr)
 
-    for i in range(cycle):
-        model = Net()
-        if cuda:
-            model.cuda()
-        optimizer = optim.SGD(model.parameters(), lr=initial_lr)
+    for i in range(cycles):
 
-        for j in range(cycle_size):
-            lr = initial_lr * (cos(pi*j/cycle_size)+1)
+        for j in range(epochs_per_cycle):
+            _epoch_loss = 0
+
+            lr = proposed_lr(initial_lr, j, epochs_per_cycle)
             optimizer.state_dict()["param_groups"][0]["lr"] = lr
+
             for batch_idx, (data, target) in enumerate(train_loader):
                 if cuda:
                     data, target = data.cuda(), target.cuda()
                 data, target = Variable(data), Variable(target)
+
                 optimizer.zero_grad()
                 output = model(data)
                 loss = F.nll_loss(output, target)
+                _epoch_loss += loss.data[0]/len(train_loader)
                 loss.backward()
                 optimizer.step()
+
+            _lr_list.append(lr)
+            _loss_list.append(_epoch_loss)
+            count += 1
+
+            if vis is not None and j % 10 == 0:
+                vis.line(np.array(_lr_list), np.arange(count), win="lr",
+                         opts=dict(title="learning rate",
+                                   xlabel="epochs",
+                                   ylabel="learning rate (s.e.)"))
+                vis.line(np.array(_loss_list), np.arange(count),  win="loss",
+                         opts=dict(title="loss",
+                                   xlabel="epochs",
+                                   ylabel="training loss (s.e.)"))
 
         models.append(model.state_dict())
     return models
 
 
-def test(models, use_model_num):
-    model = Net()
+def test_se(Model, weights, use_model_num):
+    model_list = [Model() for _ in models]
 
-    state_dict = OrderedDict()
-    for name in model.state_dict().keys():
-        state_dict[name] = torch.mean([x[name] for x in models[len(models)-use_model_num:]])
+    for model, weight in zip(model_list, weights):
+        model.load_state_dict(weight)
+        model.eval()
+        if cuda:
+            model.cuda()
 
-    model.load_state_dict(state_dict)
-    model.eval()
+    test_loss = 0
+    correct = 0
+    for data, target in test_loader:
+        if cuda:
+            data, target = data.cuda(), target.cuda()
+        data, target = Variable(data), Variable(target)
+        output_list = [model(data).unsqueeze(0) for model in model_list]
+        output = torch.mean(torch.cat(output_list), 0).squeeze()
+        test_loss += F.nll_loss(output, target).data[0]
+        pred = output.data.max(1)[1]
+        correct += pred.eq(target.data).cpu().sum()
+
+    test_loss /= len(test_loader)
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, len(test_loader.dataset),
+        100 * correct / len(test_loader.dataset)))
+
+    return test_loss
+
+
+def train_normal(model, epochs, vis=None):
+
+    optimizer = optim.Adam(model.parameters())
+
+    for epoch in range(epochs):
+        _epoch_loss = 0
+        _lr_list, _loss_list = [], []
+        for batch_idx, (data, target) in enumerate(train_loader):
+            if cuda:
+                data, target = data.cuda(), target.cuda()
+            data, target = Variable(data), Variable(target)
+
+            optimizer.zero_grad()
+            output = model(data)
+            loss = F.nll_loss(output, target)
+            _epoch_loss += loss.data[0] / len(train_loader)
+            loss.backward()
+            optimizer.step()
+
+        _loss_list.append(_epoch_loss)
+        _lr_list.append(optimizer.state_dict()["param_groups"][0]["lr"])
+
+        if vis is not None and epoch % 10 == 0:
+            vis.line(np.array(_lr_list), np.arange(epoch+1), win="lr_n",
+                     opts=dict(title="learning rate",
+                               xlabel="epochs",
+                               ylabel="learning rate (normal)"))
+            vis.line(np.array(_loss_list), np.arange(epoch+1), win="loss_n",
+                     opts=dict(title="loss",
+                               xlabel="epochs",
+                               ylabel="training loss (normal)"))
+
+    return model
+
+
+def test_normal(model):
+
     test_loss = 0
     correct = 0
     for data, target in test_loader:
@@ -94,10 +182,10 @@ def test(models, use_model_num):
         data, target = Variable(data), Variable(target)
         output = model(data)
         test_loss += F.nll_loss(output, target).data[0]
-        pred = output.data.max(1)[1]  # get the index of the max log-probability
+        pred = output.data.max(1)[1]
         correct += pred.eq(target.data).cpu().sum()
 
-    test_loss /= len(test_loader)  # loss function already averages over batch size
+    test_loss /= len(test_loader)
     print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
         test_loss, correct, len(test_loader.dataset),
         100 * correct / len(test_loader.dataset)))
@@ -105,5 +193,16 @@ def test(models, use_model_num):
     return test_loss
 
 if __name__ == '__main__':
-    models = train(100, 10, 0.1)
-    test(models, 7)
+    vis = visdom.Visdom(port=6006)
+    print("snapshot ensemble")
+    model1, model2 = Net(), Net()
+    if cuda:
+        model1.cuda()
+        model2.cuda()
+    models = train_se(model1, 30, 6, 0.1, vis)
+    test_se(Net, models, 5)
+    print("---")
+    print("normal way")
+    normal_model = train_normal(model2, 300, vis)
+    test_normal(normal_model)
+
