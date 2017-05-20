@@ -36,7 +36,7 @@ class CifarDenseNet(nn.Module):
         x = self.dense_head(x)
         x = x.view(-1, 1024)
         x = self.dense1(x)
-        return F.softmax(x)
+        return F.log_softmax(x)
 
 if __name__ == '__main__':
     vis = visdom.Visdom(port=6006)

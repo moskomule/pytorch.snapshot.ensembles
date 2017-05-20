@@ -48,7 +48,7 @@ class Net(nn.Module):
         x = F.relu(F.max_pool2d(self.conv3_bn(self.conv3(x)), 2))
         x = x.view(-1, 4 * 64)
         x = F.relu(self.dense1_bn(self.dense1(x)))
-        x = F.softmax(self.dense2(x))
+        x = F.log_softmax(self.dense2(x)) # NLL loss expects log_softmax
         return x
 
 
@@ -57,7 +57,6 @@ def proposed_lr(initial_lr, iteration, epoch_per_cycle):
     return initial_lr * (cos(pi * iteration / epoch_per_cycle) + 1) / 2
 
 
-def train_se(model, epochs, cycles, initial_lr, vis=None):
     """
     during an iteration a batch goes forward and backward  
     while during an epoch every batch of a data set is processed
