@@ -1,55 +1,16 @@
+
 from math import pi
 from math import cos
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torchvision import datasets, transforms
 from torch.autograd import Variable
 
-import visdom
 import numpy as np
 
 # variables
 cuda = torch.cuda.is_available()
-batch_size = 64
-
-# load data
-transform = transforms.Compose([transforms.ToTensor(),
-                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                                ])
-train_loader = torch.utils.data.DataLoader(
-    datasets.CIFAR10('data/cifar10', train=True, download=True,
-                     transform=transform),
-    batch_size=batch_size, shuffle=True)
-test_loader = torch.utils.data.DataLoader(
-    datasets.CIFAR10('data/cifar10', train=False, transform=transform),
-    batch_size=batch_size, shuffle=True)
-
-
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32,
-                               kernel_size=5,
-                               stride=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3)
-        self.conv2_bn = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3)
-        self.conv3_bn = nn.BatchNorm2d(64)
-        self.dense1 = nn.Linear(in_features=4 * 64, out_features=128)
-        self.dense1_bn = nn.BatchNorm1d(128)
-        self.dense2 = nn.Linear(128, 10)
-
-    def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x = F.relu(F.max_pool2d(self.conv2_bn(self.conv2(x)), 2))
-        x = F.relu(F.max_pool2d(self.conv3_bn(self.conv3(x)), 2))
-        x = x.view(-1, 4 * 64)
-        x = F.relu(self.dense1_bn(self.dense1(x)))
-        x = F.softmax(self.dense2(x))
-        return x
 
 
 def proposed_lr(initial_lr, iteration, epoch_per_cycle):
@@ -57,12 +18,9 @@ def proposed_lr(initial_lr, iteration, epoch_per_cycle):
     return initial_lr * (cos(pi * iteration / epoch_per_cycle) + 1) / 2
 
 
-def train_se(model, epochs, cycles, initial_lr, vis=None):
-    """
-    during an iteration a batch goes forward and backward  
-    while during an epoch every batch of a data set is processed
-    """
-    snapshots = []
+def train_se(model, epochs, cycles, initial_lr, train_loader, vis=None):
+
+    spapshots = []
     _lr_list, _loss_list = [], []
     count = 0
     epochs_per_cycle = epochs // cycles
@@ -102,16 +60,16 @@ def train_se(model, epochs, cycles, initial_lr, vis=None):
                                    xlabel="epochs",
                                    ylabel="training loss (s.e.)"))
 
-        snapshots.append(model.state_dict())
-    return snapshots
+        spapshots.append(model.state_dict())
+    return spapshots
 
 
-def test_se(Model, snapshots, use_model_num):
-    index = len(snapshots) - use_model_num
-    snapshots = snapshots[index:]
-    model_list = [Model() for _ in snapshots]
+def test_se(Model, weights, use_model_num, test_loader):
+    index = len(weights) - use_model_num
+    weights = weights[index:]
+    model_list = [Model() for _ in weights]
 
-    for model, weight in zip(model_list, snapshots):
+    for model, weight in zip(model_list, weights):
         model.load_state_dict(weight)
         model.eval()
         if cuda:
@@ -137,12 +95,14 @@ def test_se(Model, snapshots, use_model_num):
     return test_loss
 
 
-def train_normal(model, epochs, vis=None):
+def train_normal(model, epochs, train_loader, vis=None):
 
     optimizer = optim.Adam(model.parameters())
     _lr_list, _loss_list = [], []
+
     for epoch in range(epochs):
         _epoch_loss = 0
+
         for batch_idx, (data, target) in enumerate(train_loader):
             if cuda:
                 data, target = data.cuda(), target.cuda()
@@ -171,7 +131,7 @@ def train_normal(model, epochs, vis=None):
     return model
 
 
-def test_normal(model):
+def test_normal(model, test_loader):
 
     test_loss = 0
     correct = 0
@@ -190,18 +150,3 @@ def test_normal(model):
         100 * correct / len(test_loader.dataset)))
 
     return test_loss
-
-if __name__ == '__main__':
-    vis = visdom.Visdom(port=6006)
-    model1, model2 = Net(), Net()
-    if cuda:
-        model1.cuda()
-        model2.cuda()
-    print("snapshot ensemble")
-    models = train_se(model1, 300, 6, 0.1, vis)
-    test_se(Net, models, 5)
-    print("---")
-    print("normal way")
-    normal_model = train_normal(model2, 300, vis)
-    test_normal(normal_model)
-
